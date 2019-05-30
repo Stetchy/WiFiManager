@@ -149,6 +149,8 @@ void WiFiManager::setupConfigPortal() {
   server->on(String(F("/wifisave")), std::bind(&WiFiManager::handleWifiSave, this));
   server->on(String(F("/i")), std::bind(&WiFiManager::handleInfo, this));
   server->on(String(F("/r")), std::bind(&WiFiManager::handleReset, this));
+  server->on("/api", std::bind(&WiFiManager::handleAPI, this));
+  server->on("/apisave", std::bind(&WiFiManager::handleAPISave, this));
   //server->on("/generate_204", std::bind(&WiFiManager::handle204, this));  //Android/Chrome OS captive portal check.
   server->on(String(F("/fwlink")), std::bind(&WiFiManager::handleRoot, this));  //Microsoft captive portal. Maybe not needed. Might be handled by notFound handler.
   server->onNotFound (std::bind(&WiFiManager::handleNotFound, this));
@@ -230,46 +232,75 @@ boolean  WiFiManager::startConfigPortal(char const *apName, char const *apPasswo
 
     //DNS
     dnsServer->processNextRequest();
+
+    if (runLoop(true))
+      break; //true is we have saved and are done
+
+    //allow sketch to take control briefly
+    if (_loopcallback != NULL)
+    {
+      _loopcallback(this);
+    }
+
     //HTTP
     server->handleClient();
-
-
-    if (connect) {
-      connect = false;
-      delay(2000);
-      DEBUG_WM(F("Connecting to new AP"));
-
-      // using user-provided  _ssid, _pass in place of system-stored ssid and pass
-      if (connectWifi(_ssid, _pass) != WL_CONNECTED) {
-        DEBUG_WM(F("Failed to connect."));
-      } else {
-        //connected
-        WiFi.mode(WIFI_STA);
-        //notify that configuration has changed and any optional parameters should be saved
-        if ( _savecallback != NULL) {
-          //todo: check if any custom parameters actually exist, and check if they really changed maybe
-          _savecallback();
-        }
-        break;
-      }
-
-      if (_shouldBreakAfterConfig) {
-        //flag set to exit after config after trying to connect
-        //notify that configuration has changed and any optional parameters should be saved
-        if ( _savecallback != NULL) {
-          //todo: check if any custom parameters actually exist, and check if they really changed maybe
-          _savecallback();
-        }
-        break;
-      }
-    }
     yield();
   }
 
-  server.reset();
+  if (!_alwaysOnIsOn)
+      resetServer();
+
   dnsServer.reset();
 
   return  WiFi.status() == WL_CONNECTED;
+}
+
+boolean WiFiManager::runLoop()
+{
+  return runLoop(false);
+}
+
+boolean WiFiManager::runLoop(bool internal)
+{
+  if (!_alwaysOnIsOn && !internal)
+  { //reset everything
+    if (_serverIsConfigured)
+      resetServer();
+    return false;
+  }
+
+  if (!_serverIsConfigured)
+    configureServer();
+
+  //HTTP
+  server->handleClient();
+
+  if (connect)
+  {
+    connect = false;
+
+    if (_savecallback != NULL)
+    {
+      _savecallback();
+    }
+
+    DEBUG_WM(F("Connecting to new AP"));
+
+    if (connectWifi(_ssid, _pass) != WL_CONNECTED)
+    {
+      DEBUG_WM(F("Failed to connect."));
+    }
+    else
+    {
+      //connected
+      WiFi.mode(WIFI_STA);
+
+      return true;
+    }
+
+    return _shouldBreakAfterConfig;
+  }
+  return false;
 }
 
 
@@ -594,6 +625,36 @@ void WiFiManager::handleWifi(boolean scan) {
   DEBUG_WM(F("Sent config page"));
 }
 
+void WiFiManager::handleAPI()
+{
+  String page = FPSTR(HTTP_HEAD);
+  page.replace("{v}", "Configure API");
+  page += FPSTR(HTTP_SCRIPT);
+  page += FPSTR(HTTP_STYLE);
+  page += _customHeadElement;
+  page += FPSTR(HTTP_HEAD_END);
+  page += FPSTR(HTTP_APIFORM);
+  server->sendHeader("Content-Length", String(page.length()));
+  server->send(200, "text/html", page);
+}
+
+void WiFiManager::handleAPISave() 
+{
+  api_static_name = server->arg("s").c_str();
+  if (_apicallback != NULL) {
+    _apicallback(this);
+  }
+  String page = FPSTR(HTTP_HEAD);
+  page.replace("{v}", "Saving API...");
+  page += FPSTR(HTTP_SCRIPT);
+  page += FPSTR(HTTP_STYLE);
+  page += _customHeadElement;
+  page += FPSTR(HTTP_HEAD_END);
+  page += FPSTR(HTTP_APISAVED);
+  server->sendHeader("Content-Length", String(page.length()));
+  server->send(200, "text/html", page);
+}
+
 /** Handle the WLAN save form and redirect to WLAN config page again */
 void WiFiManager::handleWifiSave() {
   DEBUG_WM(F("WiFi save"));
@@ -814,4 +875,14 @@ String WiFiManager::toStringIp(IPAddress ip) {
   }
   res += String(((ip >> 8 * 3)) & 0xFF);
   return res;
+}
+
+void WiFiManager::setLoopCallback(void (*func)(WiFiManager *))
+{
+  _loopcallback = func;
+}
+
+void WiFiManager::setAPISaveCallback(void (*func)(WiFiManager *))
+{
+  _apicallback = func;
 }
